@@ -3,10 +3,15 @@
     proxy.py
     ~~~~~~~~
     
-    HTTP Proxy Server in Python.
-    
+    HTTP Proxy Server in Python with explicit WebSocket support.
+
     :copyright: (c) 2013 by Abhinav Singh.
     :license: BSD, see LICENSE for more details.
+
+    Added WebSocket support to modify and change WebSocket messages on Summer 2015.
+    The original source code may be found on:
+
+    https://github.com/abhinavsingh/proxy.py
 """
 from setuptools import setup
 import proxy
@@ -28,7 +33,7 @@ classifiers = [
 ]
 
 setup(
-    name                = 'proxy.py',
+    name                = 'proxy-websockets',
     version             = proxy.__version__,
     description         = proxy.__description__,
     long_description    = open('README.md').read().strip(),

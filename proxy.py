@@ -13,7 +13,6 @@
     The original source code may be found on:
 
     https://github.com/abhinavsingh/proxy.py
-
 """
 VERSION = (0, 3)
 __version__ = '.'.join(map(str, VERSION[0:2]))
