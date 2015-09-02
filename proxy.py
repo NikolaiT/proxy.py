@@ -4,17 +4,23 @@
     proxy.py
     ~~~~~~~~
     
-    HTTP Proxy Server in Python.
+    HTTP Proxy Server in Python with explicit WebSocket support.
     
     :copyright: (c) 2013 by Abhinav Singh.
     :license: BSD, see LICENSE for more details.
+
+    Added WebSocket support to modify and change WebSocket messages on Summer 2015.
+    The original source code may be found on:
+
+    https://github.com/abhinavsingh/proxy.py
+
 """
-VERSION = (0, 2)
+VERSION = (0, 3)
 __version__ = '.'.join(map(str, VERSION[0:2]))
-__description__ = 'HTTP Proxy Server in Python'
-__author__ = 'Abhinav Singh'
-__author_email__ = 'mailsforabhinav@gmail.com'
-__homepage__ = 'https://github.com/abhinavsingh/proxy.py'
+__description__ = 'HTTP Proxy Server in Python with WebSocket support'
+__author__ = 'Nikolai Tschacher'
+__author_email__ = 'contact@incolumitas.com'
+__homepage__ = 'https://github.com/NikolaiT/proxy.py'
 __license__ = 'BSD'
 
 import sys
@@ -24,6 +30,9 @@ import argparse
 import logging
 import socket
 import select
+import struct
+import pprint
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +81,200 @@ HTTP_PARSER_STATE_COMPLETE = 6
 CHUNK_PARSER_STATE_WAITING_FOR_SIZE = 1
 CHUNK_PARSER_STATE_WAITING_FOR_DATA = 2
 CHUNK_PARSER_STATE_COMPLETE = 3
+
+
+### Start modificiations by Nikolai Tschacher
+
+class WebSocketFrame(object):
+    """
+    Some code taken and modified from 
+    http://www.cs.rpi.edu/~goldsd/docs/spring2012-csci4220/websocket-py.txt
+    """
+
+    OPCODES = {
+        0: 'CONTINUATION_FRAME',
+        1: 'TEXT_FRAME',
+        2: 'BINARY_FRAME',
+        8: 'CONNECTION_CLOSE',
+        9: 'PING_FRAME',
+        0xA: 'PONG_FRAME', 
+    }
+
+    def __init__(self):
+        self.fin = None
+        self.opcode = None
+        self.mask = 0
+        self.masking_key = ''
+        self.payload_length = None
+        self.payload = ''
+        self.unmasked_payload = ''
+
+    def info(self):
+        print('WebSocket Frame: fin = {}, opcode = {}, mask = {}, masking_key: {}, payload_length = {}'.format(
+            self.fin, self.OPCODES.get(self.opcode, 'INVALID'), self.mask, self.masking_key, self.payload_length))
+        
+        print('Payload:')
+        try:
+            nice = json.loads(self.unmasked_payload)            
+            pprint.pprint(nice)
+        except:
+            print(self.unmasked_payload)
+        print('')
+
+    def update_frame(self, new_unmasked_payload):
+        """
+        This method rebuilds the WebSocket frame with the new payload.
+        """
+        if len(self.unmasked_payload) == len(new_unmasked_payload):
+            self.payload = WebSocketFrame.mask_payload(new_unmasked_payload, self.masking_key)
+            self.unmasked_payload = new_unmasked_payload
+        else:
+            raise NotImplementedError('Create static build method for websockets.')
+
+
+    def to_bytes(self):
+        message = ''
+        # always send an entire message as one frame (fin)
+        b1 = 0x80
+        b1 |= self.opcode
+
+        message += chr(b1)
+
+        # maybe mask frame
+        b2 = self.mask << 7
+
+        length = len(self.payload)
+
+        if length < 126:
+            b2 |= length
+            message += chr(b2)
+        elif length < (2 ** 16) - 1:
+            b2 |= 126
+            message += chr(b2)
+            l = struct.pack("!H", length)
+            message += l
+        else:
+            l = struct.pack("!Q", length)
+            b2 |= 127
+            message += chr(b2)
+            message += l
+
+        if self.mask == 1:
+            message += self.masking_key
+
+        message += self.payload
+
+        return message
+
+
+    @staticmethod
+    def mask_payload(payload, mask):
+        return ''.join([chr(ord(b) ^ ord(mask[i % 4])) for i, b in enumerate(payload)])
+
+
+    @staticmethod
+    def from_bytes(s):
+        f = WebSocketFrame()
+
+        if len(s) > 2:
+            payload_start = 2
+            f.fin = ord(s[0]) & 0x1
+            f.opcode = ord(s[0]) & 0xF
+            f.mask = ord(s[1]) & 0x1
+
+            # the payload length has either 7 bits, 2 bytes, or
+            # 8 bytes bitlength.
+            f.payload_length = ord(s[1]) & 0xFE
+
+            if f.payload_length == 126:
+                f.payload_length, = struct.unpack("!H", s[2:4])
+                payload_start += 2
+            elif f.payload_length == 127:
+                f.payload_length, = struct.unpack("!Q", s[2:10])
+                payload_start += 8
+
+            if f.mask == 1:
+                # masking key, if present, starts right after the payload lenth
+                f.masking_key = s[payload_start:payload_start+4]
+                payload_start += 4
+
+            f.payload = s[payload_start:f.payload_length+payload_start]
+
+            if f.mask == 1:
+                f.unmasked_payload = WebSocketFrame.mask_payload(f.payload, f.masking_key)
+            else:
+                f.unmasked_payload = f.payload
+
+        return f
+
+
+class WebSocketProxy(object):
+    """May be used to manipulate web sockets communication.
+
+    There are several points where the protocol logic can be altered:
+
+        1. Initial handshake from client to server.
+        2. Handshake response from server to client.
+        3. Outgoing WebSocket messages.
+        4. Incoming WebSocket messages.
+
+    You can register actual objects to this Proxy Plugin class by
+    adding them to WebSocketProxy.plugings
+
+    The first plugin that changes outgoing or incoming
+    messages will alter the message. All other plugins
+    don't change the WebSocket message.
+    """
+    plugins = []
+
+    @staticmethod
+    def on_client_handshake(request):
+        """
+        You may modify the initial client handshake
+        WebSocket request here. request is of type HttpParser.
+        """
+        return request
+
+    @staticmethod
+    def on_server_handshake(response):
+        """
+        You may also modify the server WebSocket response here.
+        """
+        return response
+
+    @staticmethod
+    def on_send_message(data):
+        """
+        The first plugin that modifies a outgoing
+        message will alter the message.
+        """
+        frame = WebSocketFrame.from_bytes(data)
+        frame.info()
+
+        for m in WebSocketProxy.plugins:
+            retval = m.on_send_message(frame, data)
+            if retval:
+                return retval
+
+        return data
+
+    @staticmethod
+    def on_receive_message(data):
+        """
+        The first plugin that changes the received message
+        will return the modified message.
+        """
+        frame = WebSocketFrame.from_bytes(data)
+        frame.info()
+
+        for m in WebSocketProxy.plugins:
+            retval = m.on_receive_message(frame)
+            if retval:
+                return retval
+
+        return data
+
+### End modificiations by Nikolai Tschacher
 
 
 class ChunkParser(object):
@@ -231,7 +434,10 @@ class HttpParser(object):
             req += self.body
         
         return req
-    
+
+    def __str__(self):
+        return self.raw
+
     @staticmethod
     def split(data):
         pos = data.find(CRLF)
@@ -254,6 +460,7 @@ class Connection(object):
     def recv(self, bytes=8192):
         try:
             data = self.conn.recv(bytes)
+
             if len(data) == 0:
                 logger.debug('recvd 0 bytes from %s' % self.what)
                 return None
@@ -336,6 +543,10 @@ class Proxy(multiprocessing.Process):
             b'Proxy-agent: proxy.py v' + version,
             CRLF
         ])
+
+        # WebSocket related state information
+        self.ws_client_handshake_received = False
+        self.ws_server_response_received = False
     
     def _now(self):
         return datetime.datetime.utcnow()
@@ -345,8 +556,21 @@ class Proxy(multiprocessing.Process):
     
     def _is_inactive(self):
         return self._inactive_for() > 30
+
+    def ws_handshake_established(self):
+        return self.ws_server_response_received and self.ws_client_handshake_received
     
     def _process_request(self, data):
+
+        if 'Sec-WebSocket-Version:' in data and 'Sec-WebSocket-Key:' in data:
+            request = HttpParser()
+            request.parse(data)
+            WebSocketProxy.on_client_handshake(request)
+            self.ws_client_handshake_received = True
+
+        if self.ws_handshake_established():
+            WebSocketProxy.on_send_message(data)
+
         # once we have connection to the server
         # we don't parse the http request packets
         # any further, instead just pipe incoming
@@ -362,7 +586,7 @@ class Proxy(multiprocessing.Process):
         # we attempt to establish connection to destination server
         if self.request.state == HTTP_PARSER_STATE_COMPLETE:
             logger.debug('request parser is in state complete')
-            
+
             if self.request.method == b"CONNECT":
                 host, port = self.request.url.path.split(COLON)
             elif self.request.url:
@@ -389,12 +613,21 @@ class Proxy(multiprocessing.Process):
                     del_headers=[b'proxy-connection', b'connection', b'keep-alive'], 
                     add_headers=[(b'Connection', b'Close')]
                 ))
-    
+
     def _process_response(self, data):
         # parse incoming response packet
         # only for non-https requests
         if not self.request.method == b"CONNECT":
             self.response.parse(data)
+
+        if 'Sec-WebSocket-Accept:' in data:
+            response = HttpParser()
+            response.parse(data)
+            WebSocketProxy.on_server_handshake(response)
+            self.ws_server_response_received = True
+
+        if self.ws_handshake_established():
+            WebSocketProxy.on_receive_message(data)
         
         # queue data for client
         self.client.queue(data)
@@ -409,7 +642,7 @@ class Proxy(multiprocessing.Process):
     def _get_waitable_lists(self):
         rlist, wlist, xlist = [self.client.conn], [], []
         logger.debug('*** watching client for read ready')
-        
+
         if self.client.has_buffer():
             logger.debug('pending client buffer found, watching client for write ready')
             wlist.append(self.client.conn)
