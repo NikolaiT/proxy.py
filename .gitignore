@@ -7,3 +7,5 @@ cover
 dist
 proxy.py.egg-info
 .idea/
+build/
+proxy_websockets.egg-info/

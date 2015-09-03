@@ -33,7 +33,7 @@ classifiers = [
 ]
 
 setup(
-    name                = 'proxy-websockets',
+    name                = 'proxy_websockets',
     version             = proxy.__version__,
     description         = proxy.__description__,
     long_description    = open('README.md').read().strip(),

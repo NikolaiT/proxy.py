@@ -223,6 +223,17 @@ class TestHttpParser(unittest.TestCase):
         self.assertEqual(self.parser.body, b'Wikipedia in\r\n\r\nchunks.')
         self.assertEqual(self.parser.state, HTTP_PARSER_STATE_COMPLETE)
 
+
+class TestWebSocketParser(unittest.TestCase):
+    """TODO: implementation needed"""
+
+    def setUp(self):
+        raw_frame = b'blabla'
+        self.frame = WebSocketFrame.from_bytes()
+
+    def test_websocket_frame_parse(self):
+        pass
+
 class MockConnection(object):
     
     def __init__(self, buffer=b''):

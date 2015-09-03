@@ -32,6 +32,8 @@ import select
 import struct
 import pprint
 import json
+import hashlib
+import base64
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +101,8 @@ class WebSocketFrame(object):
         0xA: 'PONG_FRAME', 
     }
 
+    GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
+
     def __init__(self):
         self.fin = None
         self.opcode = None
@@ -109,16 +113,24 @@ class WebSocketFrame(object):
         self.unmasked_payload = ''
 
     def info(self):
-        print('WebSocket Frame: fin = {}, opcode = {}, mask = {}, masking_key: {}, payload_length = {}'.format(
-            self.fin, self.OPCODES.get(self.opcode, 'INVALID'), self.mask, self.masking_key, self.payload_length))
+        print(self)
+
+    def get_frame_meta_data(self):
+        return 'WebSocket Frame: fin = {}, opcode = {}, mask = {}, masking_key: {}, payload_length = {}'.format(
+            self.fin, self.OPCODES.get(self.opcode, 'INVALID'), self.mask, self.masking_key, self.payload_length)
+
+    def __str__(self):
+        message = self.get_frame_meta_data()
         
-        print('Payload:')
+        message += 'Payload:'
         try:
             nice = json.loads(self.unmasked_payload)            
-            pprint.pprint(nice)
+            message += nice
         except:
-            print(self.unmasked_payload)
-        print('')
+            message += self.unmasked_payload
+        message += '\n'
+
+        return message
 
     def update_frame(self, new_unmasked_payload):
         """
@@ -129,7 +141,6 @@ class WebSocketFrame(object):
             self.unmasked_payload = new_unmasked_payload
         else:
             raise NotImplementedError('Create static build method for websockets.')
-
 
     def to_bytes(self):
         message = ''
@@ -172,6 +183,11 @@ class WebSocketFrame(object):
 
 
     @staticmethod
+    def calculate_server_accept_header(sec_websocket_key):
+        return base64.b64encode(hashlib.sha1((sec_websocket_key + WebSocketFrame.GUID).strip()).digest())
+
+
+    @staticmethod
     def from_bytes(s):
         f = WebSocketFrame()
 
@@ -193,7 +209,7 @@ class WebSocketFrame(object):
                 payload_start += 8
 
             if f.mask == 1:
-                # masking key, if present, starts right after the payload lenth
+                # masking key, if present, starts right after the payload length
                 f.masking_key = s[payload_start:payload_start+4]
                 payload_start += 4
 
@@ -217,14 +233,9 @@ class WebSocketProxy(object):
         3. Outgoing WebSocket messages.
         4. Incoming WebSocket messages.
 
-    You can register actual objects to this Proxy Plugin class by
-    adding them to WebSocketProxy.plugings
-
-    The first plugin that changes outgoing or incoming
-    messages will alter the message. All other plugins
-    don't change the WebSocket message.
+    You can register a plugin by setting the plugin variable.
     """
-    plugins = []
+    plugin = None
 
     @staticmethod
     def on_client_handshake(request):
@@ -232,6 +243,11 @@ class WebSocketProxy(object):
         You may modify the initial client handshake
         WebSocket request here. request is of type HttpParser.
         """
+        if WebSocketProxy.plugin and hasattr(WebSocketProxy.plugin, 'on_client_handshake'):
+            retval = WebSocketProxy.plugin.on_client_handshake(request)
+            if retval:
+                return retval
+
         return request
 
     @staticmethod
@@ -239,6 +255,11 @@ class WebSocketProxy(object):
         """
         You may also modify the server WebSocket response here.
         """
+        if WebSocketProxy.plugin and hasattr(WebSocketProxy.plugin, 'on_server_handshake'):
+            retval = WebSocketProxy.plugin.on_server_handshake(response)
+            if retval:
+                return retval
+
         return response
 
     @staticmethod
@@ -248,10 +269,11 @@ class WebSocketProxy(object):
         message will alter the message.
         """
         frame = WebSocketFrame.from_bytes(data)
-        frame.info()
 
-        for m in WebSocketProxy.plugins:
-            retval = m.on_send_message(frame, data)
+        logger.debug(frame.get_frame_meta_data())
+
+        if WebSocketProxy.plugin and hasattr(WebSocketProxy.plugin, 'on_send_message'):
+            retval = WebSocketProxy.plugin.on_send_message(frame, data)
             if retval:
                 return retval
 
@@ -264,14 +286,79 @@ class WebSocketProxy(object):
         will return the modified message.
         """
         frame = WebSocketFrame.from_bytes(data)
-        frame.info()
 
-        for m in WebSocketProxy.plugins:
-            retval = m.on_receive_message(frame)
+        logger.debug(frame.get_frame_meta_data())
+
+        if WebSocketProxy.plugin and hasattr(WebSocketProxy.plugin, 'on_receive_message'):
+            retval = WebSocketProxy.plugin.on_receive_message(frame)
             if retval:
                 return retval
 
         return data
+
+    @staticmethod
+    def on_closing_handshake(data):
+        """
+        Either peer can send a control frame with data containing a specified
+        control sequence to begin the closing handshake.
+        """
+        if WebSocketProxy.plugin and hasattr(WebSocketProxy.plugin, 'on_closing_handshake'):
+            retval = WebSocketProxy.plugin.on_closing_handshake(data)
+            if retval:
+                return retval
+
+        return data
+
+
+class HttpProxy(object):
+    """May be used to deal with HTTP Request/Response pairs.
+
+    request and response objects are of type HttpParser.
+
+
+    Always return the raw message when the modification is done.
+    """
+
+    plugin = None
+
+    @staticmethod
+    def on_request(request):
+        """request is of type HttpParser.
+
+        The plugin MUST return a request object.
+        """
+        if HttpProxy.plugin and hasattr(HttpProxy.plugin, 'on_request'):
+            if request.successfully_parsed():
+                retval = HttpProxy.plugin.on_request(request)
+                if retval:
+                    return retval
+
+        return request
+
+
+    @staticmethod
+    def await_parsed_response(request):
+        """The proxy will only parse the response if this method returns false"""
+
+        if HttpProxy.plugin and hasattr(HttpProxy.plugin, 'await_parsed_response'):
+            if request.successfully_parsed():
+                return HttpProxy.plugin.await_parsed_response(request)
+
+        return False
+
+    @staticmethod
+    def on_response(request, response):
+        """request and response are of type HTTPParser.
+
+        The plugin MUST return a response object.
+        """
+        if HttpProxy.plugin and hasattr(HttpProxy.plugin, 'on_response'):
+            if request.successfully_parsed() and response.successfully_parsed():
+                retval = HttpProxy.plugin.on_response(request, response)
+                if retval:
+                    return retval
+
+        return response
 
 ### End modificiations by Nikolai Tschacher
 
@@ -379,14 +466,18 @@ class HttpParser(object):
     
     def process_line(self, data):
         line = data.split(SP)
-        if self.type == HTTP_REQUEST_PARSER:
-            self.method = line[0].upper()
-            self.url = urlparse.urlsplit(line[1])
-            self.version = line[2]
-        else:
-            self.version = line[0]
-            self.code = line[1]
-            self.reason = b' '.join(line[2:])
+        try:
+            if self.type == HTTP_REQUEST_PARSER:
+                self.method = line[0].upper()
+                self.url = urlparse.urlsplit(line[1])
+                self.version = line[2]
+            else:
+                self.version = line[0]
+                self.code = line[1]
+                self.reason = b' '.join(line[2:])
+        except IndexError as e:
+            raise Exception('Index error with line: {}'.format(line))
+
         self.state = HTTP_PARSER_STATE_LINE_RCVD
     
     def process_header(self, data):
@@ -401,6 +492,12 @@ class HttpParser(object):
             key = parts[0].strip()
             value = COLON.join(parts[1:]).strip()
             self.headers[key.lower()] = (key, value)
+
+    def get_header(self, key):
+        return self.headers.get(key, ('', ''))[1]
+
+    def successfully_parsed(self):
+        return self.state == HTTP_PARSER_STATE_COMPLETE
     
     def build_url(self):
         if not self.url:
@@ -416,7 +513,11 @@ class HttpParser(object):
         return k + b": " + v + CRLF
     
     def build(self, del_headers=None, add_headers=None):
-        req = b" ".join([self.method, self.build_url(), self.version])
+        if self.type == HTTP_REQUEST_PARSER:
+            req = b" ".join([self.method, self.build_url(), self.version])
+        else:
+            req = b" ".join([self.version, self.code, self.reason])
+
         req += CRLF
         
         if not del_headers: del_headers = []
@@ -435,7 +536,10 @@ class HttpParser(object):
         return req
 
     def __str__(self):
-        return self.raw
+        if self.type == HTTP_REQUEST_PARSER:
+            return '{} {} {}'.format(self.url, self.method, self.version)
+        else:
+            return '{} {} {}'.format(self.version, self.code, self.reason)
 
     @staticmethod
     def split(data):
@@ -523,6 +627,8 @@ class Proxy(multiprocessing.Process):
     """HTTP proxy implementation.
     
     Accepts connection object and act as a proxy between client and server.
+
+    Detects WebSocket handshakes and the messages in a websocket communication.
     """
     
     def __init__(self, client):
@@ -546,6 +652,8 @@ class Proxy(multiprocessing.Process):
         # WebSocket related state information
         self.ws_client_handshake_received = False
         self.ws_server_response_received = False
+        self.ws_secrect_correct_predicted = False
+        self.ws_accept_header = ''
     
     def _now(self):
         return datetime.datetime.utcnow()
@@ -557,18 +665,27 @@ class Proxy(multiprocessing.Process):
         return self._inactive_for() > 30
 
     def ws_handshake_established(self):
-        return self.ws_server_response_received and self.ws_client_handshake_received
+        """
+        Checks that the handshake was observed and that
+        the handshake secret is correctly computed.
+        """
+        return self.ws_server_response_received and self.ws_client_handshake_received and self.ws_secrect_correct_predicted
     
     def _process_request(self, data):
 
+        # check for ws connections
         if 'Sec-WebSocket-Version:' in data and 'Sec-WebSocket-Key:' in data:
             request = HttpParser()
             request.parse(data)
             WebSocketProxy.on_client_handshake(request)
             self.ws_client_handshake_received = True
+            logger.debug('WebSocket client handshake received.')
+            self.ws_accept_header = WebSocketFrame.calculate_server_accept_header(request.get_header('sec-websocket-key'))
 
         if self.ws_handshake_established():
-            WebSocketProxy.on_send_message(data)
+            data = WebSocketProxy.on_send_message(data)
+            self.server.queue(data)
+            return
 
         # once we have connection to the server
         # we don't parse the http request packets
@@ -608,6 +725,7 @@ class Proxy(multiprocessing.Process):
             # for usual http requests, re-build request packet
             # and queue for the server with appropriate headers
             else:
+                self.request = HttpProxy.on_request(self.request)
                 self.server.queue(self.request.build(
                     del_headers=[b'proxy-connection', b'connection', b'keep-alive'], 
                     add_headers=[(b'Connection', b'Close')]
@@ -619,17 +737,31 @@ class Proxy(multiprocessing.Process):
         if not self.request.method == b"CONNECT":
             self.response.parse(data)
 
-        if 'Sec-WebSocket-Accept:' in data:
-            response = HttpParser()
+        # check if the TCP stream is a WebSocket Upgrade connection
+        if 'Sec-WebSocket-Accept:' in data and 'HTTP/1.1 101 Switching Protocols' in data:
+            response = HttpParser(type=HTTP_RESPONSE_PARSER)
             response.parse(data)
-            WebSocketProxy.on_server_handshake(response)
             self.ws_server_response_received = True
+            logger.debug('WebSocket server accept handshake received.')
+            WebSocketProxy.on_server_handshake(response)
+            if response.get_header('sec-websocket-accept') == self.ws_accept_header:
+                self.ws_secrect_correct_predicted = True
+            else:
+                logger.info('WebSocket handshake failed: Sec-WebSocket-Accept not correctly predicted.')
 
+        # if the websocket handshake was successfully established, we deal with ws messages
         if self.ws_handshake_established():
-            WebSocketProxy.on_receive_message(data)
-        
+            data = WebSocketProxy.on_receive_message(data)
+            self.client.queue(data)
+            return
+
+        if self.response.state == HTTP_PARSER_STATE_COMPLETE and HttpProxy.await_parsed_response(self.request):
+            self.response = HttpProxy.on_response(self.request, self.response)
+            self.client.queue(self.response.raw)
+
         # queue data for client
-        self.client.queue(data)
+        if not HttpProxy.await_parsed_response(self.request):
+            self.client.queue(data)
     
     def _access_log(self):
         host, port = self.server.addr if self.server else (None, None)
